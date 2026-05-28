@@ -1,4 +1,5 @@
 const test = require('brittle')
+const { EventEmitter } = require('events')
 const Hyperswarm = require('hyperswarm')
 const promClient = require('prom-client')
 const createTestnet = require('hyperdht/testnet')
@@ -7,6 +8,15 @@ const SwarmStats = require('.')
 const HyperswarmStats = require('.')
 
 const DEBUG = false
+const STREAM_COUNTERS = [
+  ['bytesTransmitted', 'getBytesTransmittedAcrossAllStreams'],
+  ['packetsTransmitted', 'getPacketsTransmittedAcrossAllStreams'],
+  ['bytesReceived', 'getBytesReceivedAcrossAllStreams'],
+  ['packetsReceived', 'getPacketsReceivedAcrossAllStreams'],
+  ['retransmits', 'getRetransmitsAcrossAllStreams'],
+  ['fastRecoveries', 'getFastRecoveriesAcrossAllStreams'],
+  ['rtoCount', 'getRTOCountAcrossAllStreams']
+]
 
 test('prometheus metrics', async (t) => {
   const tPrep = t.test('prep')
@@ -173,6 +183,94 @@ test('toJson', async (t) => {
   await testnet.destroy()
 })
 
+test('swarm stream counters do not decrease when raw stream counters decrease', (t) => {
+  const swarm = createFakeSwarm()
+  const stats = new HyperswarmStats(swarm)
+  const initial = {
+    bytesTransmitted: 100,
+    packetsTransmitted: 10,
+    bytesReceived: 200,
+    packetsReceived: 20,
+    retransmits: 5,
+    fastRecoveries: 3,
+    rtoCount: 1
+  }
+  const conn = createFakeConnection({ ...initial })
+
+  swarm.connections.add(conn)
+  swarm.emit('connection', conn)
+
+  assertStreamCounters(t, stats, initial)
+
+  Object.assign(conn.rawStream, {
+    bytesTransmitted: 80,
+    packetsTransmitted: 8,
+    bytesReceived: 190,
+    packetsReceived: 19,
+    retransmits: 4,
+    fastRecoveries: 2,
+    rtoCount: 0
+  })
+  assertStreamCounters(t, stats, initial)
+
+  // Repeated reads while the raw counters are still lower must not lower the baseline.
+  assertStreamCounters(t, stats, initial)
+
+  const next = {
+    bytesTransmitted: 120,
+    packetsTransmitted: 12,
+    bytesReceived: 220,
+    packetsReceived: 22,
+    retransmits: 7,
+    fastRecoveries: 5,
+    rtoCount: 3
+  }
+  Object.assign(conn.rawStream, next)
+  assertStreamCounters(t, stats, next)
+})
+
+test('swarm stream counters use the cached raw stream when a connection closes', (t) => {
+  const swarm = createFakeSwarm()
+  const stats = new HyperswarmStats(swarm)
+  const rawStream = {
+    bytesTransmitted: 100,
+    packetsTransmitted: 10,
+    bytesReceived: 200,
+    packetsReceived: 20,
+    retransmits: 5,
+    fastRecoveries: 3,
+    rtoCount: 1
+  }
+  const conn = createFakeConnection(rawStream)
+
+  swarm.connections.add(conn)
+  swarm.emit('connection', conn)
+
+  conn.rawStream = null
+  swarm.connections.delete(conn)
+  conn.emit('close')
+
+  assertStreamCounters(t, stats, rawStream)
+
+  rawStream.bytesTransmitted = 150
+  rawStream.packetsTransmitted = 15
+  rawStream.bytesReceived = 250
+  rawStream.packetsReceived = 25
+  rawStream.retransmits = 6
+  rawStream.fastRecoveries = 4
+  rawStream.rtoCount = 2
+
+  assertStreamCounters(t, stats, {
+    bytesTransmitted: 100,
+    packetsTransmitted: 10,
+    bytesReceived: 200,
+    packetsReceived: 20,
+    retransmits: 5,
+    fastRecoveries: 3,
+    rtoCount: 1
+  })
+})
+
 function getMetricValue (lines, name) {
   const match = lines.find((l) => l.startsWith(`${name} `))
   if (!match) throw new Error(`No match for ${name}`)
@@ -186,4 +284,40 @@ function getMetricValue (lines, name) {
 function hasMetric (lines, name) {
   const match = lines.find((l) => l.startsWith(`${name} `))
   return match !== undefined
+}
+
+function assertStreamCounters (t, stats, expected) {
+  for (const [name, method] of STREAM_COUNTERS) {
+    t.is(stats[method](), expected[name], name)
+  }
+}
+
+function createFakeSwarm () {
+  const swarm = new EventEmitter()
+
+  swarm.connections = new Set()
+  swarm.peers = new Map()
+  swarm.stats = {
+    updates: 0,
+    connects: {
+      client: {
+        opened: 0,
+        closed: 0,
+        attempted: 0
+      },
+      server: {
+        opened: 0,
+        closed: 0
+      }
+    }
+  }
+  swarm.dht = {}
+
+  return swarm
+}
+
+function createFakeConnection (rawStream) {
+  const conn = new EventEmitter()
+  conn.rawStream = rawStream
+  return conn
 }

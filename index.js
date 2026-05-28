@@ -1,27 +1,27 @@
 const HyperDhtStats = require('hyperdht-stats')
 
+const STREAM_COUNTERS = [
+  'bytesTransmitted',
+  'packetsTransmitted',
+  'bytesReceived',
+  'packetsReceived',
+  'retransmits',
+  'fastRecoveries',
+  'rtoCount'
+]
+
 class HyperswarmStats {
   constructor (swarm) {
     this.swarm = swarm
     this.dhtStats = new HyperDhtStats(this.swarm.dht)
 
-    this._bytesTransmittedOverClosedSwarmStreams = 0
-    this._packetsTransmittedOverClosedSwarmStreams = 0
-    this._bytesReceivedOverClosedSwarmStreams = 0
-    this._packetsReceivedOverClosedSwarmStreams = 0
-    this._retransmitsOfClosedSwarmStreams = 0
-    this._fastRecoveriesOfClosedSwarmStreams = 0
-    this._rtoCountOfClosedSwarmStreams = 0
+    this._streamCounters = new WeakMap()
+    this._streamCounterTotals = createCounterSet()
 
     swarm.on('connection', conn => {
+      this._trackConnection(conn)
       conn.on('close', () => {
-        this._bytesTransmittedOverClosedSwarmStreams += conn.rawStream?.bytesTransmitted || 0
-        this._packetsTransmittedOverClosedSwarmStreams += conn.rawStream?.packetsTransmitted || 0
-        this._bytesReceivedOverClosedSwarmStreams += conn.rawStream?.bytesReceived || 0
-        this._packetsReceivedOverClosedSwarmStreams += conn.rawStream?.packetsReceived || 0
-        this._retransmitsOfClosedSwarmStreams += conn.rawStream?.retransmits
-        this._fastRecoveriesOfClosedSwarmStreams += conn.rawStream?.fastRecoveries
-        this._rtoCountOfClosedSwarmStreams += conn.rawStream?.rtoCount
+        this._sampleConnection(conn)
       })
     })
   }
@@ -60,67 +60,32 @@ class HyperswarmStats {
     return totalMTU / count
   }
 
-  getRetransmitsAcrossAllStreams () {
-    let countFromCurrentConns = 0
-    for (const conn of this.swarm.connections) {
-      countFromCurrentConns += conn.rawStream?.retransmits || 0
-    }
-
-    return countFromCurrentConns + this._retransmitsOfClosedSwarmStreams
-  }
-
-  getFastRecoveriesAcrossAllStreams () {
-    let countFromCurrentConns = 0
-    for (const conn of this.swarm.connections) {
-      countFromCurrentConns += conn.rawStream?.fastRecoveries || 0
-    }
-
-    return countFromCurrentConns + this._fastRecoveriesOfClosedSwarmStreams
-  }
-
   getRTOCountAcrossAllStreams () {
-    let countFromCurrentConns = 0
-    for (const conn of this.swarm.connections) {
-      countFromCurrentConns += conn.rawStream?.rtoCount || 0
-    }
-
-    return countFromCurrentConns + this._rtoCountOfClosedSwarmStreams
+    return this._getStreamCounter('rtoCount')
   }
 
   getBytesTransmittedAcrossAllStreams () {
-    let bytesFromCurrentConns = 0
-    for (const conn of this.swarm.connections) {
-      bytesFromCurrentConns += conn.rawStream?.bytesTransmitted || 0
-    }
-
-    return bytesFromCurrentConns + this._bytesTransmittedOverClosedSwarmStreams
+    return this._getStreamCounter('bytesTransmitted')
   }
 
   getBytesReceivedAcrossAllStreams () {
-    let bytesFromCurrentConns = 0
-    for (const conn of this.swarm.connections) {
-      bytesFromCurrentConns += conn.rawStream?.bytesReceived || 0
-    }
-
-    return bytesFromCurrentConns + this._bytesReceivedOverClosedSwarmStreams
+    return this._getStreamCounter('bytesReceived')
   }
 
   getPacketsTransmittedAcrossAllStreams () {
-    let packetsFromCurrentConns = 0
-    for (const conn of this.swarm.connections) {
-      packetsFromCurrentConns += conn.rawStream?.packetsTransmitted || 0
-    }
-
-    return packetsFromCurrentConns + this._packetsTransmittedOverClosedSwarmStreams
+    return this._getStreamCounter('packetsTransmitted')
   }
 
   getPacketsReceivedAcrossAllStreams () {
-    let packetsFromCurrentConns = 0
-    for (const conn of this.swarm.connections) {
-      packetsFromCurrentConns += conn.rawStream?.packetsReceived || 0
-    }
+    return this._getStreamCounter('packetsReceived')
+  }
 
-    return packetsFromCurrentConns + this._packetsReceivedOverClosedSwarmStreams
+  getRetransmitsAcrossAllStreams () {
+    return this._getStreamCounter('retransmits')
+  }
+
+  getFastRecoveriesAcrossAllStreams () {
+    return this._getStreamCounter('fastRecoveries')
   }
 
   get nrPeers () {
@@ -280,6 +245,60 @@ ${this.dhtStats.toString()}`
       }
     })
   }
+
+  _getStreamCounter (name) {
+    for (const conn of this.swarm.connections) {
+      this._sampleConnectionCounter(conn, name)
+    }
+
+    return this._streamCounterTotals[name]
+  }
+
+  _sampleConnection (conn) {
+    for (const name of STREAM_COUNTERS) {
+      this._sampleConnectionCounter(conn, name)
+    }
+  }
+
+  _sampleConnectionCounter (conn, name) {
+    const stats = this._trackConnection(conn)
+    const rawStream = stats.rawStream || conn.rawStream
+    if (!rawStream) return
+
+    stats.rawStream = rawStream
+
+    const value = getCounterValue(rawStream[name])
+    const prev = stats.last[name]
+
+    // Treat observed counter drops as resets, keeping exported counters monotonic.
+    if (value < prev) return
+
+    this._streamCounterTotals[name] += value - prev
+    stats.last[name] = value
+  }
+
+  _trackConnection (conn) {
+    let stats = this._streamCounters.get(conn)
+    if (stats) return stats
+
+    stats = {
+      rawStream: conn.rawStream || null,
+      last: createCounterSet()
+    }
+
+    this._streamCounters.set(conn, stats)
+    return stats
+  }
 }
 
 module.exports = HyperswarmStats
+
+function getCounterValue (value) {
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0
+}
+
+function createCounterSet () {
+  const counters = {}
+  for (const name of STREAM_COUNTERS) counters[name] = 0
+  return counters
+}
