@@ -12,18 +12,11 @@ class HyperswarmStats {
     this._retransmitsOfClosedSwarmStreams = 0
     this._fastRecoveriesOfClosedSwarmStreams = 0
     this._rtoCountOfClosedSwarmStreams = 0
+    this._activeConnections = new Set()
 
-    swarm.on('connection', conn => {
-      conn.on('close', () => {
-        this._bytesTransmittedOverClosedSwarmStreams += conn.rawStream?.bytesTransmitted || 0
-        this._packetsTransmittedOverClosedSwarmStreams += conn.rawStream?.packetsTransmitted || 0
-        this._bytesReceivedOverClosedSwarmStreams += conn.rawStream?.bytesReceived || 0
-        this._packetsReceivedOverClosedSwarmStreams += conn.rawStream?.packetsReceived || 0
-        this._retransmitsOfClosedSwarmStreams += conn.rawStream?.retransmits
-        this._fastRecoveriesOfClosedSwarmStreams += conn.rawStream?.fastRecoveries
-        this._rtoCountOfClosedSwarmStreams += conn.rawStream?.rtoCount
-      })
-    })
+    for (const conn of swarm.connections) this._trackConnection(conn)
+
+    swarm.on('connection', conn => this._trackConnection(conn))
   }
 
   get connects () {
@@ -61,66 +54,31 @@ class HyperswarmStats {
   }
 
   getRetransmitsAcrossAllStreams () {
-    let countFromCurrentConns = 0
-    for (const conn of this.swarm.connections) {
-      countFromCurrentConns += conn.rawStream?.retransmits || 0
-    }
-
-    return countFromCurrentConns + this._retransmitsOfClosedSwarmStreams
+    return this._getActiveStreamCounter('retransmits') + this._retransmitsOfClosedSwarmStreams
   }
 
   getFastRecoveriesAcrossAllStreams () {
-    let countFromCurrentConns = 0
-    for (const conn of this.swarm.connections) {
-      countFromCurrentConns += conn.rawStream?.fastRecoveries || 0
-    }
-
-    return countFromCurrentConns + this._fastRecoveriesOfClosedSwarmStreams
+    return this._getActiveStreamCounter('fastRecoveries') + this._fastRecoveriesOfClosedSwarmStreams
   }
 
   getRTOCountAcrossAllStreams () {
-    let countFromCurrentConns = 0
-    for (const conn of this.swarm.connections) {
-      countFromCurrentConns += conn.rawStream?.rtoCount || 0
-    }
-
-    return countFromCurrentConns + this._rtoCountOfClosedSwarmStreams
+    return this._getActiveStreamCounter('rtoCount') + this._rtoCountOfClosedSwarmStreams
   }
 
   getBytesTransmittedAcrossAllStreams () {
-    let bytesFromCurrentConns = 0
-    for (const conn of this.swarm.connections) {
-      bytesFromCurrentConns += conn.rawStream?.bytesTransmitted || 0
-    }
-
-    return bytesFromCurrentConns + this._bytesTransmittedOverClosedSwarmStreams
+    return this._getActiveStreamCounter('bytesTransmitted') + this._bytesTransmittedOverClosedSwarmStreams
   }
 
   getBytesReceivedAcrossAllStreams () {
-    let bytesFromCurrentConns = 0
-    for (const conn of this.swarm.connections) {
-      bytesFromCurrentConns += conn.rawStream?.bytesReceived || 0
-    }
-
-    return bytesFromCurrentConns + this._bytesReceivedOverClosedSwarmStreams
+    return this._getActiveStreamCounter('bytesReceived') + this._bytesReceivedOverClosedSwarmStreams
   }
 
   getPacketsTransmittedAcrossAllStreams () {
-    let packetsFromCurrentConns = 0
-    for (const conn of this.swarm.connections) {
-      packetsFromCurrentConns += conn.rawStream?.packetsTransmitted || 0
-    }
-
-    return packetsFromCurrentConns + this._packetsTransmittedOverClosedSwarmStreams
+    return this._getActiveStreamCounter('packetsTransmitted') + this._packetsTransmittedOverClosedSwarmStreams
   }
 
   getPacketsReceivedAcrossAllStreams () {
-    let packetsFromCurrentConns = 0
-    for (const conn of this.swarm.connections) {
-      packetsFromCurrentConns += conn.rawStream?.packetsReceived || 0
-    }
-
-    return packetsFromCurrentConns + this._packetsReceivedOverClosedSwarmStreams
+    return this._getActiveStreamCounter('packetsReceived') + this._packetsReceivedOverClosedSwarmStreams
   }
 
   get nrPeers () {
@@ -279,6 +237,38 @@ ${this.dhtStats.toString()}`
         this.set(self.getRTOCountAcrossAllStreams())
       }
     })
+  }
+
+  _getActiveStreamCounter (name) {
+    let total = 0
+    for (const conn of this._activeConnections) {
+      total += conn.rawStream?.[name] || 0
+    }
+    return total
+  }
+
+  _trackConnection (conn) {
+    if (this._activeConnections.has(conn)) return
+
+    this._activeConnections.add(conn)
+
+    conn.on('close', () => this._closeConnection(conn))
+  }
+
+  _closeConnection (conn) {
+    if (!this._activeConnections.has(conn)) return
+
+    const rawStream = conn.rawStream
+
+    this._bytesTransmittedOverClosedSwarmStreams += rawStream?.bytesTransmitted || 0
+    this._packetsTransmittedOverClosedSwarmStreams += rawStream?.packetsTransmitted || 0
+    this._bytesReceivedOverClosedSwarmStreams += rawStream?.bytesReceived || 0
+    this._packetsReceivedOverClosedSwarmStreams += rawStream?.packetsReceived || 0
+    this._retransmitsOfClosedSwarmStreams += rawStream?.retransmits || 0
+    this._fastRecoveriesOfClosedSwarmStreams += rawStream?.fastRecoveries || 0
+    this._rtoCountOfClosedSwarmStreams += rawStream?.rtoCount || 0
+
+    this._activeConnections.delete(conn)
   }
 }
 
