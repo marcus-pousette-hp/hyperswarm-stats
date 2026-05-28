@@ -13,7 +13,7 @@ class HyperswarmStats {
     this._fastRecoveriesOfClosedSwarmStreams = 0
     this._rtoCountOfClosedSwarmStreams = 0
 
-    swarm.on('connection', conn => {
+    const onconnection = conn => {
       conn.on('close', () => {
         this._bytesTransmittedOverClosedSwarmStreams += conn.rawStream?.bytesTransmitted || 0
         this._packetsTransmittedOverClosedSwarmStreams += conn.rawStream?.packetsTransmitted || 0
@@ -23,7 +23,10 @@ class HyperswarmStats {
         this._fastRecoveriesOfClosedSwarmStreams += conn.rawStream?.fastRecoveries
         this._rtoCountOfClosedSwarmStreams += conn.rawStream?.rtoCount
       })
-    })
+    }
+
+    for (const conn of swarm.connections) onconnection(conn)
+    swarm.on('connection', onconnection)
   }
 
   get connects () {
