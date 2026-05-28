@@ -1,5 +1,5 @@
 const test = require('brittle')
-const { EventEmitter } = require('events')
+const { once } = require('events')
 const Hyperswarm = require('hyperswarm')
 const promClient = require('prom-client')
 const createTestnet = require('hyperdht/testnet')
@@ -8,15 +8,6 @@ const SwarmStats = require('.')
 const HyperswarmStats = require('.')
 
 const DEBUG = false
-const STREAM_COUNTERS = [
-  ['bytesTransmitted', 'getBytesTransmittedAcrossAllStreams'],
-  ['packetsTransmitted', 'getPacketsTransmittedAcrossAllStreams'],
-  ['bytesReceived', 'getBytesReceivedAcrossAllStreams'],
-  ['packetsReceived', 'getPacketsReceivedAcrossAllStreams'],
-  ['retransmits', 'getRetransmitsAcrossAllStreams'],
-  ['fastRecoveries', 'getFastRecoveriesAcrossAllStreams'],
-  ['rtoCount', 'getRTOCountAcrossAllStreams']
-]
 
 test('prometheus metrics', async (t) => {
   const tPrep = t.test('prep')
@@ -183,21 +174,50 @@ test('toJson', async (t) => {
   await testnet.destroy()
 })
 
-test('swarm stream counters include connections present before stats setup', (t) => {
-  const swarm = createFakeSwarm()
-  const rawStream = createRawStreamStats()
-  const conn = createFakeConnection(rawStream)
+test('swarm stream counters include connections present before stats setup and have correct close accounting', async (t) => {
+  const tSetup = t.test('setup')
+  tSetup.plan(1)
+  const testnet = await createTestnet()
+  const bootstrap = testnet.bootstrap
 
-  swarm.connections.add(conn)
+  const swarm = new Hyperswarm({ bootstrap })
+  const swarm2 = new Hyperswarm({ bootstrap })
+
+  swarm2.listen()
+  await new Promise(resolve => setTimeout(resolve, 200)) // announce
+
+  let conn = null
+  swarm.on('connection', c => {
+    if (conn) return // re-connect
+    c.on('error', () => {})
+    conn = c
+    conn.send(b4a.from('some data'))
+    setTimeout(() => tSetup.pass('setup'), 200) // stats not incremented in same or next tick
+  })
+  swarm2.on('connection', c => {
+    c.on('error', () => {})
+  })
+  swarm.joinPeer(swarm2.keyPair.publicKey)
+
+  await tSetup
+
+  const initBytesTransmitted = conn.rawStream.bytesTransmitted
+  t.ok(initBytesTransmitted > 0, 'sanity check')
 
   const stats = new HyperswarmStats(swarm)
+  t.is(stats.getBytesTransmittedAcrossAllStreams(), initBytesTransmitted, 'correct init of existing streams')
+  const closedProm = once(conn, 'close')
+  conn.destroy()
+  const finalBytesTransmitted = conn.rawStream.bytesTransmitted
 
-  assertStreamCounters(t, stats, rawStream)
+  await closedProm
 
-  swarm.connections.delete(conn)
-  conn.emit('close')
+  t.is(stats.swarm.connections.size, 0, 'closed (sanity check)')
+  t.is(stats.getBytesTransmittedAcrossAllStreams(), finalBytesTransmitted, 'Correct accounting after existing stream closed')
 
-  assertStreamCounters(t, stats, rawStream)
+  await swarm.destroy()
+  await swarm2.destroy()
+  await testnet.destroy()
 })
 
 function getMetricValue (lines, name) {
@@ -213,52 +233,4 @@ function getMetricValue (lines, name) {
 function hasMetric (lines, name) {
   const match = lines.find((l) => l.startsWith(`${name} `))
   return match !== undefined
-}
-
-function assertStreamCounters (t, stats, expected) {
-  for (const [name, method] of STREAM_COUNTERS) {
-    t.is(stats[method](), expected[name], name)
-  }
-}
-
-function createFakeSwarm () {
-  const swarm = new EventEmitter()
-
-  swarm.connections = new Set()
-  swarm.peers = new Map()
-  swarm.stats = {
-    updates: 0,
-    connects: {
-      client: {
-        opened: 0,
-        closed: 0,
-        attempted: 0
-      },
-      server: {
-        opened: 0,
-        closed: 0
-      }
-    }
-  }
-  swarm.dht = {}
-
-  return swarm
-}
-
-function createFakeConnection (rawStream) {
-  const conn = new EventEmitter()
-  conn.rawStream = rawStream
-  return conn
-}
-
-function createRawStreamStats () {
-  return {
-    bytesTransmitted: 100,
-    packetsTransmitted: 10,
-    bytesReceived: 200,
-    packetsReceived: 20,
-    retransmits: 5,
-    fastRecoveries: 3,
-    rtoCount: 1
-  }
 }
